@@ -1,7 +1,12 @@
 
-require("umap")
+#require("umap")
+require("uwot")
 require("data.table") # for the shift function
 require("zoo") # for rollmeans
+
+# new libraries 
+require("corrplot")
+require("kernlab")
 
 # for testing
 # require("Rtsne")
@@ -21,13 +26,13 @@ umap_main <- function(data_path, filename, lam, maximal_cluster_number, optimal_
   if ( on_off_smoothing ){
     print("Turn on smoothing") 
   }
-  
-  # data_path <- "~/Documents/StoatyDiveResults/SLBP"
-  # filename <- "SLBP_rep2_sorted"
-  # lam <- 0.3
-  # maximal_cluster_number <- 15
-  # on_off_smoothing <- TRUE
-  # optimal_k <- 7
+
+  data_path <- "~/Documents/StoatyDiveResults/SLBP"
+  filename <- "SLBP_rep2_sorted"
+  lam <- 0.3
+  maximal_cluster_number <- 15
+  on_off_smoothing <- TRUE
+  optimal_k <- 6
   
   ############
   ##  Input ##
@@ -123,7 +128,7 @@ umap_main <- function(data_path, filename, lam, maximal_cluster_number, optimal_
   # function to find optimal number of clusters
   kopt_means <- function(data, k.max){
     
-    num_centroids <- c(2:k.max) 
+    num_centroids <- c(1:k.max) 
     
     kmeans <- sapply(num_centroids, function(k){kmeans(data, centers = k, nstart = 100, iter.max = 10000)})
     
@@ -149,9 +154,9 @@ umap_main <- function(data_path, filename, lam, maximal_cluster_number, optimal_
     }
     percantage_diff <- differences/sum(differences)
     
-    if (  is.na(which( percantage_diff < 0.05 )[1] ) == FALSE ){
-      if ( which( percantage_diff < 0.05 )[1] < opt ) {
-        opt <- which( percantage_diff < 0.05 )[1] + 2
+    if (  is.na(which( percantage_diff < 0.1 )[1] ) == FALSE ){
+      if ( which( percantage_diff < 0.1 )[1] < opt ) {
+        opt <- which( percantage_diff < 0.1 )[1] + 1
       }
     }
     
@@ -236,6 +241,10 @@ umap_main <- function(data_path, filename, lam, maximal_cluster_number, optimal_
   # max_abs_diff <- apply( data_removed_duplicates, 1, function(x){max(abs(diff(x)))} )
   # data_ready <- cbind(data_ready, max_abs_diff)
   
+  # Variance Features
+  variance <- apply(data_removed_duplicates, 1, var)
+  data_ready <- cbind(data_ready, variance)
+  
   # #########
   # ## PCA ##
   # #########
@@ -289,14 +298,16 @@ umap_main <- function(data_path, filename, lam, maximal_cluster_number, optimal_
   #############
   
   d <- 2
-  custom.config = umap.defaults
-  custom.config$n_epochs = 5000
-  custom.config$n_components = d
-  custom.config$min_dist = 0.01
-  custom.config$n_neighbors = 5
+  # custom.config = umap.defaults
+  # custom.config$n_epochs = 5000
+  # custom.config$n_components = d
+  # custom.config$min_dist = 0.01
+  # custom.config$n_neighbors = 5
   
-  data_umap = umap(data_ready, config = custom.config)
-  new_data <- data_umap$layout
+  #data_umap = umap(data_ready, config = custom.config)
+  #new_data <- data_umap$layout
+  data_umap = uwot::umap(data_ready, n_epochs=5000, n_components=d, min_dist=0.01, n_neighbors=5)
+  new_data <- data_umap
   
   # Remove constant value profiles
   constant_profiles <- apply( data_removed_duplicates, 1, function(x){return(length(which(x!=0)))} )
@@ -307,29 +318,122 @@ umap_main <- function(data_path, filename, lam, maximal_cluster_number, optimal_
   ###############
   ### kmeans  ###
   ###############
-  
+
   returned_optimisation_values <- kopt_means(new_data_for_kmeans, maximal_cluster_number)
   optimal_num_centroids <- returned_optimisation_values[1]
   optimal_perc <- returned_optimisation_values[2]
-  
-  if ( optimal_k != -1 ){
+
+  if ( optimal_k > 0 ){
     optimal_num_centroids <- optimal_k
   }
-  
+
   ## use kmeans clustering with optimal number of centroids
-  clusters <- kmeans(new_data_for_kmeans, centers=optimal_num_centroids, nstart = 100, iter.max = 10000)$cluster
+  kmeans_obj <- kmeans(new_data_for_kmeans, centers=optimal_num_centroids, nstart = 10000, iter.max = 10000)
+  clusters <- kmeans_obj$cluster
+
+  num_clusters <- length(unique(clusters))
+
+  kmeans_centers <- kmeans_obj$centers
+  memberships <- matrix(nrow=nrow(new_data_for_kmeans), ncol=optimal_num_centroids)
+  for(i in 1:nrow(kmeans_centers)){
+    memberships[,i] <- apply(new_data_for_kmeans, 1, function(x){dist(rbind(kmeans_centers[i,],x))})
+  }
+  prob_memberships <- memberships
+  prob_memberships <- apply(memberships, 1, function(x){1-(x/max(x))})
+  prob_memberships <- matrix(prob_memberships, nrow=nrow(new_data_for_kmeans), ncol=optimal_num_centroids, byrow=TRUE)
+  prob_memberships <- apply(prob_memberships, 1, function(x){x/sum(x)})
+  prob_memberships <- matrix(prob_memberships, nrow=nrow(new_data_for_kmeans), ncol=optimal_num_centroids, byrow=TRUE)
   
-  num_clusters <- length(unique(clusters)) 
+  fc_memberships <- prob_memberships
   
-  # Add cluster of constant values 
+  # Add cluster of constant values
   if ( length(constant_profiles) != 0 ){
     num_clusters <- num_clusters + 1
-    add_constant_cluster <- rep(-1, nrow(new_data))
-    add_constant_cluster[non_constant_profiles] <- clusters
-    add_constant_cluster[constant_profiles] <- num_clusters
-    clusters <- add_constant_cluster
+    fc_add_constant_cluster <- rep(-1, nrow(new_data))
+    fc_add_constant_cluster[non_constant_profiles] <- clusters
+    fc_add_constant_cluster[constant_profiles] <- num_clusters
+    fc_clusters <- fc_add_constant_cluster
+
+    fc_memberships <- matrix(ncol=num_clusters, nrow=nrow(new_data))
+    fc_memberships[non_constant_profiles,] <- cbind(prob_memberships, rep(0.0, nrow(prob_memberships)))
+    fc_memberships[constant_profiles,] <- c(rep(0.0, optimal_num_centroids), 1.0)
+    colnames(fc_memberships) <- c(1:num_clusters)
   }
-  
+  clusters <- fc_clusters
+
+  pdf(paste0(output_path, "/fuzzy_clustering_overview.pdf"), width = 2, height = 30)
+  par(family="serif")
+  if( nrow(prob_memberships) > 200 ){
+    corrplot(prob_memberships[1:200,], is.corr=FALSE, cl.lim=c(0.0, 1.0), cl.ratio=0.5)
+  } else {
+    corrplot(prob_memberships, is.corr=FALSE, cl.lim=c(0.0, 1.0))
+  }
+  dev.off()
+ 
+  ############################
+  ### Spectral Clustering  ###
+  ############################
+  # 
+  # returned_optimisation_values <- kopt_means(new_data_for_kmeans, maximal_cluster_number)
+  # optimal_num_centroids <- returned_optimisation_values[1]
+  # optimal_perc <- returned_optimisation_values[2]
+  # 
+  # if ( optimal_k > 0 ){
+  #   optimal_num_centroids <- optimal_k
+  # }
+  # 
+  # optimal_num_centroids <- 5
+  # 
+  # ## use kmeans clustering with optimal number of centroids
+  # spectral_obj <- NULL
+  # attempt <- 1
+  # while( is.null(spectral_obj) && attempt <= 100 ) {
+  #   attempt <- attempt + 1
+  #   try(
+  #     spectral_obj <- kkmeans(new_data_for_kmeans, centers=optimal_num_centroids, kernel="besseldot", iterations=5000)
+  #   )
+  # } 
+  # 
+  # clusters <- spectral_obj[1:length(spectral_obj)]
+  # 
+  # num_clusters <- length(unique(clusters))
+  # 
+  # spectral_centers <- centers(spectral_obj)
+  # memberships <- matrix(nrow=nrow(new_data_for_kmeans), ncol=optimal_num_centroids)
+  # for(i in 1:nrow(spectral_centers)){
+  #   memberships[,i] <- apply(new_data_for_kmeans, 1, function(x){dist(rbind(spectral_centers[i,],x))})
+  # }
+  # prob_memberships <- memberships
+  # prob_memberships <- apply(memberships, 1, function(x){1-(x/max(x))})
+  # prob_memberships <- matrix(prob_memberships, nrow=nrow(new_data_for_kmeans), ncol=optimal_num_centroids, byrow=TRUE)
+  # prob_memberships <- apply(prob_memberships, 1, function(x){x/sum(x)})
+  # prob_memberships <- matrix(prob_memberships, nrow=nrow(new_data_for_kmeans), ncol=optimal_num_centroids, byrow=TRUE)
+  # 
+  # fc_memberships <- prob_memberships
+  # 
+  # # Add cluster of constant values
+  # if ( length(constant_profiles) != 0 ){
+  #   num_clusters <- num_clusters + 1
+  #   fc_add_constant_cluster <- rep(-1, nrow(new_data))
+  #   fc_add_constant_cluster[non_constant_profiles] <- clusters
+  #   fc_add_constant_cluster[constant_profiles] <- num_clusters
+  #   fc_clusters <- fc_add_constant_cluster
+  #   
+  #   fc_memberships <- matrix(ncol=num_clusters, nrow=nrow(new_data))
+  #   fc_memberships[non_constant_profiles,] <- cbind(prob_memberships, rep(0.0, nrow(prob_memberships)))
+  #   fc_memberships[constant_profiles,] <- c(rep(0.0, optimal_num_centroids), 1.0)
+  #   colnames(fc_memberships) <- c(1:num_clusters)
+  # }
+  # clusters <- fc_clusters
+  # 
+  # pdf(paste0(output_path, "/fuzzy_clustering_overview.pdf"), width = 5, height = 15)
+  # if( nrow(prob_memberships) > 100 ){
+  #   corrplot(prob_memberships[1:100,], is.corr=FALSE, cl.lim=c(0.0, 1.0))
+  # } else {
+  #   corrplot(prob_memberships, is.corr=FALSE, cl.lim=c(0.0, 1.0))
+  # }
+  # dev.off()
+  # 
   #########################
   ##  Visualize Clusters ##
   #########################
@@ -382,6 +486,20 @@ umap_main <- function(data_path, filename, lam, maximal_cluster_number, optimal_
   outputmatrix[match(rownames(data_removed_duplicates), outputmatrix[,13]), ncol(outputmatrix)] <- clusters
   
   write.table(outputmatrix, file=paste0(data_path, "/final_tab_", filename, ".bed"), row.names = FALSE, col.names = FALSE, quote = FALSE, sep="\t")
+  
+  #########################
+  ## Create Fuzzy Matrix ##
+  #########################
+  
+  fuzzy_data_table <- matrix(ncol=ncol(fc_memberships), nrow=nrow(data))
+  
+  fuzzy_data_table[which(duplicated(data_normalized) == FALSE),] <- fc_memberships
+  fuzzy_data_table[duplicates,] <- fc_memberships[uMAP_peaks_corresponding_to_duplicate,]
+    
+  colnames(fuzzy_data_table) <- paste0("cluster_", c(1:ncol(fc_memberships)))
+  rownames(fuzzy_data_table) <- paste0("peak_", c(1:nrow(data)))
+  
+  write.table(round(fuzzy_data_table,4), file=paste0(data_path, "/fuzzy_clustering_table.tsv"), row.names = TRUE, col.names = NA, quote = FALSE, sep="\t")
   
   ########################################
   ## Generate Peak Profiles of Clusters ##
