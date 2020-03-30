@@ -82,7 +82,7 @@ def main():
         metavar='float',
         default=0.5,
         help="Set a normalized CV threshold to divide the peak profiles into more specific (0) and more "
-             "unspecific (1). [Default: 1.0]")
+             "unspecific (1). [Default: 0.5]")
     parser.add_argument(
         "--peak_correction",
         action='store_true',
